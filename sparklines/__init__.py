@@ -1,6 +1,6 @@
-from .sparklines import SparkBar, Sparkline, MultiSparkline
+from .sparklines import Sparkbar, Sparkline, MultiSparkline
 
 
 __all__ = [Sparkline,
-           SparkBar,
+           Sparkbar,
            MultiSparkline]

@@ -1,11 +1,10 @@
-from operator import itemgetter
-from copy import copy
-
 from jinja2 import Template
 import numpy as np
 
 
-SVG_BASE_TEMPLATE = Template("""
+# flake8: noqa
+SVG_BASE_TEMPLATE = Template(
+    """
     {%- block svg_outer -%}
         <svg width="{{width}}"
              height="{{height}}"
@@ -13,23 +12,51 @@ SVG_BASE_TEMPLATE = Template("""
              version="1.1"
              xmlns="http://www.w3.org/2000/svg"
              >
+
+          {% block styles %}
+          <style>
+            <![CDATA[
+            circle.start, circle.end, circle.min, circle.max {
+              r: {{ height_offset }}
+            }
+            .start, .end { fill: {{ line_color }}; }
+            polyline.sparkline {
+              fill: transparent;
+              stroke-width: 1;
+            }
+            .sparkbar {
+              stroke-width: 0;
+            }
+            ]]>
+          </style>
+          {% endblock %}
+
           {%- block svg_inner -%}
           {% endblock %}
         </svg>
     {% endblock %}
     """)
 
-SVG_MACROS = Template("""
-    {% macro circle(x, y, fill, class="", r=2) -%}
-        <circle cx="{{ x }}"
-                cy="{{ y }}"
-                r="{{ r }}"
-                fill="{{ fill }}"
-                class="{{ class }}"
-                />
+# flake8: noqa
+SVG_MACROS = Template(
+    """
+    {% macro circle(x, y, fill="", class="", r=2, id=None) -%}
+      <circle cx="{{ x }}"
+              cy="{{ y }}"
+              r="{{ r }}"
+              fill="{{ fill }}"
+              class="{{ class }}"
+              {% if id %}id="{{id}}"{% endif %}
+              />
     {%- endmacro %}
     {% macro point(x, y) %}{{ x }},{{ y }} {% endmacro %}
     """)
+
+
+def _svg_to_img_data(svg):
+    return "data:image/svg+xml;utf-8,{src}".format(
+        src=svg.replace('"', "'")
+    )
 
 
 class SparkBase(object):
@@ -55,10 +82,16 @@ class SparkBase(object):
         return self._render_outer()
 
     def _repr_html_(self):
-        return self.render()
+        gfx = self._render_outer()
+        return (
+            """<img src="{src}" width={width} height={height} />"""
+            .format(src=_svg_to_img_data(gfx),
+                    width=self.width,
+                    height=self.height)
+        )
 
     def __repr__(self):
-        return self.render()
+        return str(self)
 
     def __str__(self):
         return self.render()
@@ -114,61 +147,56 @@ class Sparkline(SparkBase):
     """
 
     # flake8: noqa
-    TEMPLATE = """
+    TEMPLATE = (
+        """
         {% from SVG_MACROS import circle, point %}
 
         {% block svg_inner -%}
 
-            <polyline points="
+            <polyline class="sparkline" stroke="{{line_color}}" points="
                 {%- for x, y in points -%}
                     {{ point(x, y) }}
-                {%- endfor -%} "
-                class="line"
-                fill="transparent"
-                stroke="{{ line_color }}"
-                />
+                {%- endfor -%}
+                " />
 
             {%- if show_start -%}
               {{ circle(points[0][0],
                         points[0][1],
-                        line_color,
-                        class="start",
-                        r=height_offset)
-              }}
+                        fill=line_color,
+                        class="start") }}
             {% endif %}
 
             {%- if show_end -%}
               {{ circle(points[-1][0],
                         points[-1][1],
-                        line_color,
-                        class="end",
-                        r=height_offset)
-              }}
+                        fill=line_color,
+                        class="end") }}
             {% endif %}
 
             {%- for x, y in maxs -%}
-              {{ circle(x, y, max_color, class="max", r=height_offset) }}
+              {{ circle(x, y, class="max", fill=max_color) }}
             {% endfor %}
 
             {%- for x, y in mins -%}
-              {{ circle(x, y, min_color, class="min", r=height_offset) }}
+              {{ circle(x, y, class="min", fill=min_color) }}
             {% endfor %}
 
         {%- endblock %}
-    """
+        """
+    )
 
     DEFAULTS = dict(SparkBase.DEFAULTS,
-                    height_offset=2.5,
-                    width_offset=2.5,
+                    height_offset=2.6,
+                    width_offset=2.6,
 
                     show_max=False,
                     show_min=False,
                     show_start=False,
-                    show_end=True,
+                    show_end=False,
 
                     min_color="#ff0000",
                     max_color="#8ca252",
-                    line_color="#000000")
+                    line_color="#555")
 
     def __init__(self, data, **kwargs):
         ctx = dict(self.DEFAULTS, **kwargs)
@@ -202,7 +230,7 @@ class Sparkline(SparkBase):
                             mins=mins)
 
 
-class SparkBar(SparkBase):
+class Sparkbar(SparkBase):
 
     TEMPLATE = """
         {% block svg_inner -%}
@@ -213,6 +241,8 @@ class SparkBar(SparkBase):
                 width="{{ w }}"
                 height="{{ h }}"
                 fill="{{ bar_color }}"
+                storke="{{ bar_color }}"
+                class='sparkbar'
                 />
         {% endfor %}
         {% endblock %}
@@ -225,25 +255,28 @@ class SparkBar(SparkBase):
     def __init__(self, data, **kwargs):
         ctx = dict(self.DEFAULTS, **kwargs)
 
-        width = ctx['width']
-        height = ctx['height']
-        bar_spacing = ctx['bar_spacing']
+        width = float(ctx['width'])
+        height = float(ctx['height'])
+        bar_spacing = float(ctx['bar_spacing'])
+
+        if bar_spacing == 0.0:
+            bar_spacing = -0.3
 
         data = np.array(data)
         size = data.size
 
-        bar_width = width / (size + bar_spacing)
+        bar_width = ctx.get('bar_width',
+                            (width - (size - 1) * bar_spacing) / (size))
 
-        ymin = ctx.get('ymin') or data.min()
-        ymax = ctx.get('ymax') or data.max()
+        ymin = ctx.get('ymin', data.min())
+        ymax = ctx.get('ymax', data.max())
         scaled = height * (data - ymin) / (ymax - ymin)
 
         ys = height - scaled
         heights = scaled
-        widths = np.array([bar_width for _ in range(size)])
-        xs = (widths + bar_spacing).cumsum()
+        xs = np.array([(bar_width + bar_spacing) * i for i in range(size)])
 
-        bars = list(zip(xs, ys, widths, heights))
+        bars = list(zip(xs, ys, np.repeat([bar_width], size), heights))
 
         self.context = dict(ctx, bars=bars)
 
@@ -275,7 +308,7 @@ class MultiSparkline(object):
             if self.width == other.width and self.height == other.height:
                 return MultiSparkline(self.values + other.values)
 
-        if isinstance(other, Sparkline):
+        if isinstance(other, SparkBase):
             if self.width == other.width and self.height == other.height:
                 return MultiSparkline(self.values + [other])
 
@@ -294,10 +327,10 @@ class MultiSparkline(object):
                                     SVG_BASE_TEMPLATE=SVG_BASE_TEMPLATE)
 
     def _repr_html_(self):
-        return self.render()
-
-    def __repr__(self):
-        return self.render()
-
-    def __str__(self):
-        return self.render()
+        gfx = self.render()
+        return (
+            """<img src="{src}" width={width} height={height} />"""
+            .format(src=_svg_to_img_data(gfx),
+                    width=self.width,
+                    height=self.height)
+        )
