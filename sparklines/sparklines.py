@@ -1,98 +1,47 @@
-from jinja2 import Template
+from collections import Iterable
+import xml.etree.ElementTree as ET
+
+# from jinja2 import Template
 import numpy as np
 
 
-# flake8: noqa
-SVG_BASE_TEMPLATE = Template(
-    """
-    {%- block svg_outer -%}
-        <svg width="{{width}}"
-             height="{{height}}"
-             class="{{ class if class else 'svg' }}"
-             version="1.1"
-             xmlns="http://www.w3.org/2000/svg"
-             >
-
-          {% block styles %}
-          <style>
-            <![CDATA[
-            circle.start, circle.end, circle.min, circle.max {
-              r: {{ height_offset }}
-            }
-            .start, .end { fill: {{ line_color }}; }
-            polyline.sparkline {
-              fill: transparent;
-              stroke-width: 1.5;
-            }
-            .sparkbar {
-              stroke-width: 0;
-            }
-            ]]>
-          </style>
-          {% endblock %}
-
-          {%- block svg_inner -%}
-          {% endblock %}
-        </svg>
-    {% endblock %}
-    """)
-
-# flake8: noqa
-SVG_MACROS = Template(
-    """
-    {% macro circle(x, y, fill="", class="", r=2, id=None) -%}
-      <circle cx="{{ x }}"
-              cy="{{ y }}"
-              r="{{ r }}"
-              fill="{{ fill }}"
-              class="{{ class }}"
-              {% if id %}id="{{id}}"{% endif %}
-              />
-    {%- endmacro %}
-    {% macro point(x, y) %}{{ x }},{{ y }} {% endmacro %}
-    """)
+def cdata(s):
+    return "<![CDATA[{}]]>".format(s)
 
 
-def _svg_to_img_data(svg):
-    return "data:image/svg+xml;utf-8,{src}".format(
-        src=svg.replace('"', "'")
-    )
+DEFAULT_STROKE_WIDTH = 2
 
 
 class SparkBase(object):
 
-    DEFAULTS = {
-        'width': 150,
-        'height': 20,
-        'SVG_MACROS': SVG_MACROS,
-    }
+    def __init__(self, width=150, height=25, **kwargs):
+        self.width = width
+        self.height = height
+        self.local_css = []
 
     @property
-    def TEMPLATE(self):
-        raise NotImplementedError()
+    def CSS(self):
+        return "\n".join(self.local_css)
 
-    def _render_inner(self):
-        """Render SVG template."""
-        return Template(self.TEMPLATE).render(self.context)
+    @property
+    def root(self):
+        root = ET.Element('svg', attrib={
+            'xmlns': 'http://www.w3.org/2000/svg',
+            'version': '1.1',
+            'width': str(self.width),
+            'height': str(self.height),
+        })
 
-    def _render_outer(self):
-        return Template(self.OUTER_TEMPLATE).render(
-            self.context,
-            SVG_BASE_TEMPLATE=SVG_BASE_TEMPLATE
-        )
+        style = ET.SubElement(root, 'style')
+        style.text = '__CSS__'
+        style.set('type', 'text/css')
+        return root
+
+    def inner(self, root):
+        return root
 
     def render(self):
-        """Render SVG template."""
-        return self._render_outer()
-
-    def _repr_html_(self):
-        gfx = self._render_outer()
-        return (
-            """<img src="{src}" width={width} height={height} />"""
-            .format(src=_svg_to_img_data(gfx),
-                    width=self.width,
-                    height=self.height)
-        )
+        return ET.tostring(self.inner(self.root)).replace('__CSS__', cdata(self.CSS), 1)
 
     def __repr__(self):
         return str(self)
@@ -100,241 +49,214 @@ class SparkBase(object):
     def __str__(self):
         return self.render()
 
-    @property
-    def width(self):
-        return self.context['width']
+    def _as_img(self):
+        return "data:image/svg+xml;utf-8,{src}".format(
+            src=self.render().replace('"', "'")
+        )
 
-    @property
-    def height(self):
-        return self.context['height']
+    def _repr_html_(self):
+        # return self.render()
+        return '<img width="{width}" height="{height}" src="{src}">'.format(
+            width=self.width,
+            height=self.height,
+            src=self._as_img(),
+        )
 
     def __add__(self, other):
         if isinstance(other, SparkBase):
-            if self.width == other.width and self.height == other.height:
-                return MultiSparkline([self, other])
-            else:
-                raise ValueError("Sparklines must have the same dimensions")
-        raise TypeError("Cannot add to Sparkline")
+            left = MultiSparkline(
+                [self],
+                width=self.width,
+                height=self.height
+            )
+            return left.add(other)
+        else:
+            raise ValueError("Cannot add this object to sparkline")
 
-    @property
-    def OUTER_TEMPLATE(self):
-        return "{}{}".format("{% extends SVG_BASE_TEMPLATE %}", self.TEMPLATE)
+
+def normalize(x):
+    """Scale array to [0, 1]"""
+    _, (xmin, xmax) = np.histogram(x, bins=1)
+    return (x - xmin) / (xmax - xmin)
 
 
 class Sparkline(SparkBase):
-    """SVG Sparkline from numpy array.
+    """Classic Solid sparkline """
 
-    :param data:
-        Array data to be used for line
-    :param width: default 150px
-        Width of svg
-    :param height: default 20px
-        Height of svg
-    :param height_offset:
-        Offset from top/bottom to line
-    :param width_offset:
-        Offset from sides to lines
-    :param show_max:
-        Show green dot indicating maximums
-    :param show_min:
-        Show red dot indicating minimums
-    :param min_color:
-        Color of dot representing minimum value
-    :param max_color:
-        Color of dot representing maximum value
-    :param line_color:
-        Color of lines
-    :param ymin:
-        Minimum y value on scale
-    :param ymax:
-        Maximum y value on scale
-    """
-
-    # flake8: noqa
-    TEMPLATE = (
+    def __init__(
+            self,
+            y,
+            x=None,
+            color='#000000',
+            cls='sparkline',
+            stroke_width=DEFAULT_STROKE_WIDTH,
+            name=None,
+            alpha=1,
+            **kwargs):
         """
-        {% from SVG_MACROS import circle, point %}
-
-        {% block svg_inner -%}
-
-            <polyline class="sparkline" stroke="{{line_color}}" points="
-                {%- for x, y in points -%}
-                    {{ point(x, y) }}
-                {%- endfor -%}
-                " />
-
-            {%- if show_start -%}
-              {{ circle(points[0][0],
-                        points[0][1],
-                        fill=line_color,
-                        class="start") }}
-            {% endif %}
-
-            {%- if show_end -%}
-              {{ circle(points[-1][0],
-                        points[-1][1],
-                        fill=line_color,
-                        class="end") }}
-            {% endif %}
-
-            {%- for x, y in maxs -%}
-              {{ circle(x, y, class="max", fill=max_color) }}
-            {% endfor %}
-
-            {%- for x, y in mins -%}
-              {{ circle(x, y, class="min", fill=min_color) }}
-            {% endfor %}
-
-        {%- endblock %}
+        param x: array of x values
+        param y: array of y values
         """
-    )
+        super(Sparkline, self).__init__(**kwargs)
+        self.cls = cls
+        self.name = name if name is not None else "sparkline_{}".format(id(self))
 
-    DEFAULTS = dict(SparkBase.DEFAULTS,
-                    height_offset=2.6,
-                    width_offset=2.6,
+        self.stroke_width = stroke_width
+        self.x = x
+        self.y = y
 
-                    show_max=False,
-                    show_min=False,
-                    show_start=False,
-                    show_end=False,
-
-                    min_color="#ff0000",
-                    max_color="#8ca252",
-                    line_color="#555")
-
-    def __init__(self, data, **kwargs):
-        ctx = dict(self.DEFAULTS, **kwargs)
-
-        width = ctx['width']
-        height = ctx['height']
-        width_offset = ctx['width_offset']
-        height_offset = ctx['height_offset']
-
-        data = np.array(data)
-
-        ymin = ctx.get('ymin', data.min())
-        ymax = ctx.get('ymax', data.max())
-        scaled = (data - ymin) / (ymax - ymin)
-        range = height - 2 * height_offset
-
-        ys = height_offset + range * (1 - scaled)
-        xs = np.linspace(width_offset, width - width_offset, num=data.size)
-        points = list(zip(xs, ys))
-
-        def get_condition(cnd):
-            ix = np.where(cnd)
-            return list(zip(xs[ix], ys[ix]))
-
-        mins = get_condition(data == ymin) if ctx.get('show_min') else []
-        maxs = get_condition(data == ymax) if ctx.get('show_max') else []
-
-        self.context = dict(ctx,
-                            points=points,
-                            maxs=maxs,
-                            mins=mins)
-
-
-class Sparkbar(SparkBase):
-
-    TEMPLATE = """
-        {% block svg_inner -%}
-        {%- for x, y, w, h in bars -%}
-            <rect
-                x="{{ x }}"
-                y="{{ y }}"
-                width="{{ w }}"
-                height="{{ h }}"
-                fill="{{ bar_color }}"
-                storke="{{ bar_color }}"
-                class='sparkbar'
-                />
-        {% endfor %}
-        {% endblock %}
-    """
-
-    DEFAULTS = dict(SparkBase.DEFAULTS,
-                    bar_spacing=0,
-                    bar_color="#000000")
-
-    def __init__(self, data, **kwargs):
-        ctx = dict(self.DEFAULTS, **kwargs)
-
-        width = float(ctx['width'])
-        height = float(ctx['height'])
-        bar_spacing = float(ctx['bar_spacing'])
-
-        if bar_spacing == 0.0:
-            bar_spacing = -0.3
-
-        data = np.array(data)
-        size = data.size
-
-        bar_width = ctx.get('bar_width',
-                            (width - (size - 1) * bar_spacing) / (size))
-
-        ymin = ctx.get('ymin', data.min())
-        ymax = ctx.get('ymax', data.max())
-        scaled = height * (data - ymin) / (ymax - ymin)
-
-        ys = height - scaled
-        heights = scaled
-        xs = np.array([(bar_width + bar_spacing) * i for i in range(size)])
-
-        bars = list(zip(xs, ys, np.repeat([bar_width], size), heights))
-
-        self.context = dict(ctx, bars=bars)
-
-
-class MultiSparkline(object):
-    """MultiSparkline class used to stack Sparklines on the same axis
-
-    Parameters:
-    -----------
-    :param values: List of Sparkline objects
-    """
-
-    TEMPLATE = Template("""
-        {% extends SVG_BASE_TEMPLATE %}
-        {% block svg_inner %}
-            {% for sparkline in sparklines -%}
-                {{ sparkline }}
-            {%- endfor %}
-        {% endblock %}
-    """)
-
-    def __init__(self, values=None):
-        self.values = values or []
-        self.width = values[0].width if values else 0
-        self.height = values[0].height if values else 0
-
-    def __add__(self, other):
-        if isinstance(other, MultiSparkline):
-            if self.width == other.width and self.height == other.height:
-                return MultiSparkline(self.values + other.values)
-
-        if isinstance(other, SparkBase):
-            if self.width == other.width and self.height == other.height:
-                return MultiSparkline(self.values + [other])
-
-        raise TypeError("Only Sparkline and MultiSparkline objects may be "
-                        "added to a MultiSparkline.")
-
-    def get_context(self):
-        return {
-            'width': self.width,
-            'height': self.height,
-            'sparklines': (v._render_inner() for v in self.values)
-        }
-
-    def render(self):
-        return self.TEMPLATE.render(self.get_context(),
-                                    SVG_BASE_TEMPLATE=SVG_BASE_TEMPLATE)
-
-    def _repr_html_(self):
-        gfx = self.render()
-        return (
-            """<img src="{src}" width={width} height={height} />"""
-            .format(src=_svg_to_img_data(gfx),
-                    width=self.width,
-                    height=self.height)
+        self.local_css.append(
+            """
+            #{id} polyline {{
+                stroke: {color};
+                stroke-width: {stroke_width};
+                fill: transparent;
+                opacity: {alpha};
+            }}
+            """.format(
+                id=self.name,
+                color=color,
+                stroke_width=self.stroke_width,
+                alpha=alpha
+            )
         )
+
+    def inner(self, root):
+        base = ET.SubElement(root, 'g')
+        base.set('class', self.cls)
+
+        if self.name:
+            base.set('id', str(self.name))
+
+        y = self.y
+        x = self.x
+        stroke_width = self.stroke_width
+
+        y = (1 - normalize(y)) * (self.height - 2 * stroke_width) + stroke_width
+
+        x = x if x is not None else np.linspace(0, 1, len(y))
+        x = (normalize(x)) * (self.width - 2 * stroke_width) + stroke_width
+
+        points = " ".join(
+            ["{:.5f},{:.5f}".format(_x, _y) for _x, _y in zip(x, y)]
+        )
+
+        ET.SubElement(base, 'polyline', attrib={
+            'points': points,
+        })
+        return root
+
+
+class Sparkblock(SparkBase):
+    """Highlited block on a Sparkline
+
+    Can be used to highlight a confidence interval or differentiate periods.
+    """
+
+    def __init__(
+            self, x, y,
+            color='#3cb371',
+            alpha=0.25,
+            cls='sparkblock',
+            name=None,
+            stroke_width=DEFAULT_STROKE_WIDTH,
+            **kwargs):
+        """
+        param x: x values used to sync between sparkline and block
+        param y: array of true/false values specifying where block starts and
+                 ends. Must be contiguous with no breaks or gaps.
+        """
+        super(Sparkblock, self).__init__(**kwargs)
+        self.cls = cls
+        self.name = name if name is not None else "sparkblock_{}".format(id(self))
+        self.stroke_width = stroke_width
+
+        self.x = x
+        self.y = y
+
+        self.local_css.append(
+            """
+            #{id} rect {{
+                fill: {color};
+                opacity: {alpha};
+            }}
+            """.format(
+                id=self.name,
+                color=color,
+                stroke_width=stroke_width,
+                alpha=alpha,
+            )
+        )
+
+    def inner(self, root):
+        base = ET.SubElement(root, 'g')
+        base.set('class', self.cls)
+        if self.name:
+            base.set('id', str(self.name))
+
+        x = self.x
+        y = self.y
+        stroke_width = self.stroke_width
+
+        x = (normalize(x)) * (self.width - 2 * stroke_width) + stroke_width
+
+        ixs = np.argwhere(y)
+        if len(ixs):
+            start = ixs[0][0]
+            end = ixs[-1][0]
+            start = x[start]
+            end = x[end]
+        else:
+            start = end = None
+
+        if not start or not end:
+            return root
+
+        x = start
+        y = 0
+        w = end - start
+        h = self.height
+
+        ET.SubElement(base, 'rect', attrib={
+            'x': str(x),
+            'y': str(y),
+            'width': str(w),
+            'height': str(h),
+        })
+        return root
+
+
+class MultiSparkline(SparkBase):
+    """Composition of Sparkline objects.
+
+    Objects are composed in the order they are input, with the last objects
+    added being drawn at the top of the SVG.
+    """
+
+    def __init__(self, *children, **kwargs):
+        super(MultiSparkline, self).__init__(**kwargs)
+
+        self.children = []
+        for c in children:
+            if isinstance(c, SparkBase):
+                self.children.append(c)
+            elif isinstance(c, Iterable):
+                self.children.extend(c)
+
+        for child in self.children:
+            self.local_css += child.local_css
+
+    def add(self, other):
+        if isinstance(other, MultiSparkline):
+            return MultiSparkline(self.children + other.children)
+        elif isinstance(other, SparkBase):
+            return MultiSparkline(self.children + [other])
+        else:
+            raise ValueError("Can only combine sparkline objects.")
+
+    def inner(self, root):
+        for child in self.children:
+            child.width = self.width
+            child.height = self.height
+            child.inner(root)
+        return root
