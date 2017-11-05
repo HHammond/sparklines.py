@@ -22,7 +22,7 @@ SVG_BASE_TEMPLATE = Template(
             .start, .end { fill: {{ line_color }}; }
             polyline.sparkline {
               fill: transparent;
-              stroke-width: 1;
+              stroke-width: 1.5;
             }
             .sparkbar {
               stroke-width: 0;
@@ -66,6 +66,10 @@ class SparkBase(object):
         'height': 20,
         'SVG_MACROS': SVG_MACROS,
     }
+
+    @property
+    def TEMPLATE(self):
+        raise NotImplementedError()
 
     def _render_inner(self):
         """Render SVG template."""
