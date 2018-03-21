@@ -1,7 +1,9 @@
+from __future__ import division
+
+
 from collections import Iterable
 import xml.etree.ElementTree as ET
 
-# from jinja2 import Template
 import numpy as np
 
 
@@ -41,7 +43,8 @@ class SparkBase(object):
         return root
 
     def render(self):
-        return ET.tostring(self.inner(self.root)).replace('__CSS__', cdata(self.CSS), 1)
+        css = cdata(self.CSS)
+        return ET.tostring(self.inner(self.root)).replace('__CSS__', css, 1)
 
     def __repr__(self):
         return str(self)
@@ -89,7 +92,7 @@ class Sparkline(SparkBase):
             x=None,
             color='#000000',
             cls='sparkline',
-            stroke_width=DEFAULT_STROKE_WIDTH,
+            stroke_weight=DEFAULT_STROKE_WIDTH,
             name=None,
             alpha=1,
             **kwargs):
@@ -101,7 +104,7 @@ class Sparkline(SparkBase):
         self.cls = cls
         self.name = name if name is not None else "sparkline_{}".format(id(self))
 
-        self.stroke_width = stroke_width
+        self.stroke_weight = stroke_weight
         self.x = x
         self.y = y
 
@@ -109,14 +112,15 @@ class Sparkline(SparkBase):
             """
             #{id} polyline {{
                 stroke: {color};
-                stroke-width: {stroke_width};
+                stroke-width: {stroke_weight};
+                stroke-linecap: round;
                 fill: transparent;
                 opacity: {alpha};
             }}
             """.format(
                 id=self.name,
                 color=color,
-                stroke_width=self.stroke_width,
+                stroke_weight=self.stroke_weight,
                 alpha=alpha
             )
         )
@@ -130,12 +134,12 @@ class Sparkline(SparkBase):
 
         y = self.y
         x = self.x
-        stroke_width = self.stroke_width
+        stroke_weight = self.stroke_weight
 
-        y = (1 - normalize(y)) * (self.height - 2 * stroke_width) + stroke_width
+        y = (1 - normalize(y)) * (self.height - 2 * stroke_weight) + stroke_weight
 
         x = x if x is not None else np.linspace(0, 1, len(y))
-        x = (normalize(x)) * (self.width - 2 * stroke_width) + stroke_width
+        x = (normalize(x)) * (self.width - 2 * stroke_weight) + stroke_weight
 
         points = " ".join(
             ["{:.5f},{:.5f}".format(_x, _y) for _x, _y in zip(x, y)]
@@ -159,7 +163,8 @@ class Sparkblock(SparkBase):
             alpha=0.25,
             cls='sparkblock',
             name=None,
-            stroke_width=DEFAULT_STROKE_WIDTH,
+            box_height=None,
+            stroke_weight=DEFAULT_STROKE_WIDTH,
             **kwargs):
         """
         param x: x values used to sync between sparkline and block
@@ -169,10 +174,11 @@ class Sparkblock(SparkBase):
         super(Sparkblock, self).__init__(**kwargs)
         self.cls = cls
         self.name = name if name is not None else "sparkblock_{}".format(id(self))
-        self.stroke_width = stroke_width
+        self.stroke_weight = stroke_weight
 
         self.x = x
         self.y = y
+        self.box_height = box_height
 
         self.local_css.append(
             """
@@ -183,7 +189,7 @@ class Sparkblock(SparkBase):
             """.format(
                 id=self.name,
                 color=color,
-                stroke_width=stroke_width,
+                stroke_weight=stroke_weight,
                 alpha=alpha,
             )
         )
@@ -196,9 +202,9 @@ class Sparkblock(SparkBase):
 
         x = self.x
         y = self.y
-        stroke_width = self.stroke_width
+        stroke_weight = self.stroke_weight
 
-        x = (normalize(x)) * (self.width - 2 * stroke_width) + stroke_width
+        x = (normalize(x)) * (self.width - 2 * stroke_weight) + stroke_weight
 
         ixs = np.argwhere(y)
         if len(ixs):
@@ -212,10 +218,12 @@ class Sparkblock(SparkBase):
         if not start or not end:
             return root
 
+        height = self.height if self.box_height is None else self.box_height
+
         x = start
-        y = 0
+        y = self.height / 2 - height / 2
         w = end - start
-        h = self.height
+        h = height
 
         ET.SubElement(base, 'rect', attrib={
             'x': str(x),
